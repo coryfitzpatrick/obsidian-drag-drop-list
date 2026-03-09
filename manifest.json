@@ -1,0 +1,9 @@
+{
+	"id": "drag-drop-list",
+	"name": "Drag & Drop List Items",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Drag and drop list items within and between lists using a handle icon.",
+	"author": "Cory Fitzpatrick",
+	"isDesktopOnly": false
+}
