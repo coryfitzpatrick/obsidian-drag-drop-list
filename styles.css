@@ -1,4 +1,5 @@
 /* ===== Reading View: drag handle ===== */
+
 .ddl-list-item-wrapper {
 	position: relative;
 	overflow: visible !important;
@@ -19,6 +20,23 @@
 	transition: opacity 0.15s ease;
 	color: var(--text-faint);
 	border-radius: 3px;
+	z-index: 10;
+}
+
+/* Mobile Reading View: handle hidden, shown only on selected item */
+.ddl-mobile-handle {
+	left: auto !important;
+	right: 8px;
+	opacity: 0;
+	width: 24px;
+	height: 28px;
+	font-size: 18px;
+	color: var(--text-muted);
+}
+
+.ddl-mobile-selected > .ddl-mobile-handle {
+	opacity: 1;
+	color: var(--text-normal);
 }
 
 .ddl-drag-handle:hover {
@@ -35,26 +53,14 @@
 	height: 24px;
 }
 
-.ddl-list-item-wrapper:hover > .ddl-drag-handle {
+.ddl-list-item-wrapper:hover > .ddl-drag-handle,
+.task-list-item:hover > .ddl-drag-handle,
+.plugin-tasks-list-item:hover > .ddl-drag-handle,
+[data-task]:hover > .ddl-drag-handle {
 	opacity: 1;
 }
 
-/* Ensure ALL parent containers don't clip the handle */
-.markdown-reading-view ul,
-.markdown-reading-view ol,
-.markdown-reading-view li,
-.markdown-reading-view .list-bullet,
-.markdown-reading-view .list-collapse-indicator,
-.markdown-reading-view .markdown-preview-section,
-.markdown-reading-view .markdown-preview-sizer,
-.markdown-reading-view .markdown-preview-view,
-.markdown-reading-view .cm-sizer,
-.markdown-preview-view,
-.markdown-preview-sizer {
-	overflow: visible !important;
-}
-
-/* Ensure task plugin containers don't clip the handle */
+/* Prevent parent containers from clipping the handle (Live Preview only) */
 .block-language-tasks,
 .block-language-tasks ul,
 .tasks-plugin-main-list,
@@ -64,57 +70,75 @@
 	overflow: visible !important;
 }
 
-/* Tasks plugin items */
-.task-list-item:hover > .ddl-drag-handle,
-.plugin-tasks-list-item:hover > .ddl-drag-handle,
-[data-task]:hover > .ddl-drag-handle {
-	opacity: 1;
-}
+/* ===== Live Preview: drag handle via CSS pseudo-element ===== */
 
-/* ===== Live Preview: allow handles to overflow into margin ===== */
 .markdown-source-view.mod-cm6 .cm-content,
 .markdown-source-view.mod-cm6 .cm-sizer {
 	overflow: visible !important;
 }
 
-/* ===== Live Preview: ensure fold indicator stays above handle ===== */
 .markdown-source-view.mod-cm6 .cm-fold-indicator {
 	z-index: 11;
 }
 
-/* ===== Live Preview: make cm-line a positioning context ===== */
 .cm-line.HyperMD-list-line {
 	position: relative;
 }
 
-/* ===== Live Preview: drag handle via CSS pseudo-element ===== */
+/* Desktop only: pseudo-element handle on left */
 .cm-line.HyperMD-list-line::after {
-	content: "⠿" !important;
-	position: absolute !important;
-	right: calc(100% + 5px) !important;
-	top: 0 !important;
-	font-size: 18px !important;
-	width: 30px !important;
-	height: 24px !important;
-	display: flex !important;
-	align-items: center !important;
-	justify-content: center !important;
-	cursor: grab !important;
-	opacity: 0 !important;
-	transition: opacity 0.15s ease !important;
-	color: var(--text-faint) !important;
-	border-radius: 3px !important;
-	z-index: 10 !important;
-	text-indent: 0 !important;
+	content: "⠿";
+	position: absolute;
+	right: calc(100% + 5px);
+	top: 0;
+	font-size: 18px;
+	width: 30px;
+	height: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: grab;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+	color: var(--text-faint);
+	border-radius: 3px;
+	z-index: 10;
+	text-indent: 0;
 }
 
-/* Show handle on line hover */
 .cm-line.HyperMD-list-line:hover::after {
-	opacity: 1 !important;
-	color: var(--text-normal) !important;
+	opacity: 1;
+	color: var(--text-normal);
 }
 
-/* ===== Drop indicator line ===== */
+/* Mobile: hide pseudo-element, we use a floating handle instead */
+.ddl-is-mobile .cm-line.HyperMD-list-line::after {
+	display: none;
+}
+
+/* ===== Mobile floating handle for Live Preview ===== */
+
+.ddl-float-handle {
+	position: fixed;
+	right: 2px;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	font-size: 18px;
+	width: 40px;
+	height: 28px;
+	color: var(--text-normal);
+	cursor: grab;
+	z-index: 100;
+	touch-action: none;
+}
+
+.ddl-float-handle.ddl-visible {
+	display: flex;
+}
+
+/* ===== Drop indicator ===== */
+
 .ddl-drop-indicator {
 	position: absolute;
 	left: 0;
@@ -138,42 +162,34 @@
 	transform: translateY(-50%);
 }
 
-.ddl-drop-indicator::before {
-	left: -3px;
-}
+.ddl-drop-indicator::before { left: -3px; }
+.ddl-drop-indicator::after { right: -3px; }
 
-.ddl-drop-indicator::after {
-	right: -3px;
-}
+/* ===== Drag active state ===== */
 
-/* ===== Dragging state ===== */
 .ddl-dragging {
-	opacity: 0.4;
+	opacity: 0.4 !important;
 }
 
-.ddl-dragging > .ddl-drag-handle {
-	opacity: 0 !important;
-}
-
-/* Prevent text selection while dragging */
 body.ddl-drag-active,
 body.ddl-drag-active * {
 	user-select: none !important;
 	-webkit-user-select: none !important;
 }
 
-/* Hide all handles while any drag is in progress */
-body.ddl-drag-active .ddl-drag-handle {
-	opacity: 0 !important;
-	pointer-events: none;
-}
-
+body.ddl-drag-active .ddl-drag-handle,
 body.ddl-drag-active .cm-line.HyperMD-list-line::after {
 	opacity: 0 !important;
 	pointer-events: none;
 }
 
+body.ddl-drag-active .ddl-float-handle {
+	display: none !important;
+}
+
+
 /* ===== Ghost element ===== */
+
 .ddl-ghost {
 	position: fixed;
 	pointer-events: none;

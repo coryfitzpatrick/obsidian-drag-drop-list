@@ -1,11 +1,11 @@
-import { Plugin, MarkdownView, Editor } from "obsidian";
-
-interface ListItem {
-	line: number;
-	text: string;
-	indent: number;
-	children: ListItem[];
-}
+import { Plugin, MarkdownView, Editor, Platform } from "obsidian";
+import {
+	ListItem,
+	parseListItems,
+	getItemWithChildren,
+	moveListItems,
+	isListLine,
+} from "./list-utils";
 
 interface DragState {
 	sourceLine: number;
@@ -18,13 +18,26 @@ interface DragState {
 	container: HTMLElement;
 }
 
+function getCoords(e: MouseEvent | TouchEvent): { clientX: number; clientY: number } | null {
+	if ("touches" in e) {
+		const touch = e.touches[0] || e.changedTouches[0];
+		return touch ? { clientX: touch.clientX, clientY: touch.clientY } : null;
+	}
+	return { clientX: e.clientX, clientY: e.clientY };
+}
+
+const SCROLL_EDGE = 60;
+const SCROLL_SPEED = 8;
+
 export default class DragDropListPlugin extends Plugin {
 	private dragState: DragState | null = null;
-	private handleContainers = new WeakSet<HTMLElement>();
 	private debounceTimer: number | null = null;
+	private scrollInterval: number | null = null;
+	private lastDragY = 0;
 	private isUpdatingDOM = false;
 	private mutationObserver: MutationObserver | null = null;
 	private globalMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+	private globalTouchStartHandler: ((e: TouchEvent) => void) | null = null;
 
 	async onload() {
 		this.registerEvent(
@@ -47,13 +60,13 @@ export default class DragDropListPlugin extends Plugin {
 		});
 
 		this.globalMouseDownHandler = (e: MouseEvent) => {
-			this.onGlobalMouseDown(e);
+			this.onGlobalPointerDown(e);
 		};
-		document.addEventListener(
-			"mousedown",
-			this.globalMouseDownHandler,
-			true
-		);
+		this.globalTouchStartHandler = (e: TouchEvent) => {
+			this.onGlobalPointerDown(e);
+		};
+		document.addEventListener("mousedown", this.globalMouseDownHandler, true);
+		document.addEventListener("touchstart", this.globalTouchStartHandler, { capture: true, passive: false });
 
 		this.mutationObserver = new MutationObserver((mutations) => {
 			for (const mutation of mutations) {
@@ -89,14 +102,55 @@ export default class DragDropListPlugin extends Plugin {
 			this.mutationObserver = null;
 		}
 		if (this.globalMouseDownHandler) {
-			document.removeEventListener(
-				"mousedown",
-				this.globalMouseDownHandler,
-				true
-			);
+			document.removeEventListener("mousedown", this.globalMouseDownHandler, true);
 			this.globalMouseDownHandler = null;
 		}
+		if (this.globalTouchStartHandler) {
+			document.removeEventListener("touchstart", this.globalTouchStartHandler, { capture: true });
+			this.globalTouchStartHandler = null;
+		}
 	}
+
+	// ---- Editor Helpers ----
+
+	private getEditorLines(editor: Editor): string[] {
+		const lines: string[] = [];
+		for (let i = 0; i < editor.lineCount(); i++) {
+			lines.push(editor.getLine(i));
+		}
+		return lines;
+	}
+
+	private startAutoScroll(scrollEl: HTMLElement) {
+		this.stopAutoScroll();
+		this.scrollInterval = window.setInterval(() => {
+			const rect = scrollEl.getBoundingClientRect();
+			const y = this.lastDragY;
+			if (y < rect.top + SCROLL_EDGE) {
+				scrollEl.scrollTop -= SCROLL_SPEED;
+			} else if (y > rect.bottom - SCROLL_EDGE) {
+				scrollEl.scrollTop += SCROLL_SPEED;
+			}
+		}, 16);
+	}
+
+	private stopAutoScroll() {
+		if (this.scrollInterval !== null) {
+			window.clearInterval(this.scrollInterval);
+			this.scrollInterval = null;
+		}
+	}
+
+	private setEditorLines(editor: Editor, lines: string[]) {
+		const lastLine = editor.lineCount() - 1;
+		editor.replaceRange(
+			lines.join("\n"),
+			{ line: 0, ch: 0 },
+			{ line: lastLine, ch: editor.getLine(lastLine).length }
+		);
+	}
+
+	// ---- Scheduling & Attachment ----
 
 	private scheduleAttach() {
 		if (this.debounceTimer !== null) {
@@ -112,29 +166,52 @@ export default class DragDropListPlugin extends Plugin {
 		const view =
 			this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view) return;
-		const container = view.contentEl;
-		this.addHandlesToReadingView(container);
+		// Don't add drag handles in Reading mode — only Live Preview / Source
+		if (view.getMode() === "preview") return;
+		this.addHandlesToReadingView(view.contentEl);
 	}
 
-	/**
-	 * Only add handles to reading view <li> elements.
-	 * For live preview (CM), we use CSS ::after + event delegation instead.
-	 */
+	// ---- Reading View Handles ----
+
 	private addHandlesToReadingView(container: HTMLElement) {
 		if (this.isUpdatingDOM) return;
 		this.isUpdatingDOM = true;
-		const readingItems = container.querySelectorAll(
-			".markdown-reading-view li, .markdown-reading-view .task-list-item, .markdown-reading-view [data-task], .tasks-plugin-main-list li, .plugin-tasks-list-item"
-		);
-		readingItems.forEach((li) => {
-			if (
-				li instanceof HTMLElement &&
-				!li.querySelector(":scope > .ddl-drag-handle")
-			) {
-				this.addDragHandle(li, container);
-			}
-		});
+		container
+			.querySelectorAll(
+				".markdown-reading-view li, .markdown-reading-view .task-list-item, .markdown-reading-view [data-task], .tasks-plugin-main-list li, .plugin-tasks-list-item"
+			)
+			.forEach((li) => {
+				if (
+					li instanceof HTMLElement &&
+					!li.querySelector(":scope > .ddl-drag-handle")
+				) {
+					this.addDragHandle(li, container);
+				}
+			});
 		this.isUpdatingDOM = false;
+	}
+
+	private addDragHandle(li: HTMLElement, container: HTMLElement) {
+		li.classList.add("ddl-list-item-wrapper");
+		const handle = document.createElement("div");
+		handle.className = "ddl-drag-handle";
+		handle.appendChild(this.createHandleSVG());
+		const startDrag = (e: MouseEvent | TouchEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.startDrag(e, li, container, "reading");
+		};
+		handle.addEventListener("mousedown", startDrag);
+		handle.addEventListener("touchstart", startDrag, { passive: false });
+		handle.style.zIndex = "10";
+		if (Platform.isMobile) {
+			handle.style.left = "auto";
+			handle.style.right = "-28px";
+			handle.style.opacity = "0.5";
+			handle.style.width = "28px";
+			handle.style.height = "28px";
+		}
+		li.insertBefore(handle, li.firstChild);
 	}
 
 	private createHandleSVG(): SVGSVGElement {
@@ -161,48 +238,37 @@ export default class DragDropListPlugin extends Plugin {
 		return svg;
 	}
 
-	private addDragHandle(li: HTMLElement, container: HTMLElement) {
-		li.classList.add("ddl-list-item-wrapper");
-		const handle = document.createElement("div");
-		handle.className = "ddl-drag-handle";
-		handle.appendChild(this.createHandleSVG());
-		handle.addEventListener("mousedown", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.startDragReading(e, li, container);
-		});
-		li.insertBefore(handle, li.firstChild);
-	}
-
 	private removeAllHandles() {
 		document
 			.querySelectorAll(".ddl-drag-handle")
 			.forEach((h) => h.remove());
 		document
 			.querySelectorAll(".ddl-list-item-wrapper")
-			.forEach((el) => el.classList.remove("ddl-list-item-wrapper"));
+			.forEach((el) =>
+				el.classList.remove("ddl-list-item-wrapper")
+			);
 		document
 			.querySelectorAll(".ddl-cm-list-line")
 			.forEach((el) => el.classList.remove("ddl-cm-list-line"));
 	}
 
-	// ---- Global mousedown for CM drag handles (event delegation) ----
+	// ---- CM Drag Handle Detection (event delegation) ----
 
-	private onGlobalMouseDown(e: MouseEvent) {
+	private onGlobalPointerDown(e: MouseEvent | TouchEvent) {
+		const coords = getCoords(e);
+		if (!coords) return;
 		const target = e.target;
 		if (!(target instanceof HTMLElement)) return;
 		const cmLine = target.closest(".cm-line");
 		if (!cmLine || !(cmLine instanceof HTMLElement)) return;
 		if (!this.isListItemLine(cmLine)) return;
 		const lineRect = cmLine.getBoundingClientRect();
-		const clickX = e.clientX;
-		const contentLeft = lineRect.left;
-		if (clickX > contentLeft + 30) return;
+		if (coords.clientX > lineRect.left + 30) return;
 		const container = cmLine.closest(".markdown-source-view");
 		if (!container || !(container instanceof HTMLElement)) return;
 		e.preventDefault();
 		e.stopPropagation();
-		this.startDragCM(e, cmLine, container);
+		this.startDrag(e, cmLine, container, "cm");
 	}
 
 	private isListItemLine(el: HTMLElement): boolean {
@@ -212,37 +278,63 @@ export default class DragDropListPlugin extends Plugin {
 			el.querySelector("[class*='cm-list-']") !== null ||
 			el.querySelector("input[type='checkbox']") !== null ||
 			el.querySelector(".task-list-item-checkbox") !== null ||
-			/^\s*[-*+]\s/.test(el.textContent || "") ||
-			/^\s*[-*+]\s*\[.\]\s/.test(el.textContent || "") ||
-			/^\s*\d+\.\s/.test(el.textContent || "")
+			isListLine(el.textContent || "")
 		);
 	}
 
-	// ---- Reading View Drag ----
+	// ---- Unified Drag Logic ----
 
-	private startDragReading(
-		e: MouseEvent,
-		li: HTMLElement,
-		container: HTMLElement
+	private startDrag(
+		e: MouseEvent | TouchEvent,
+		element: HTMLElement,
+		container: HTMLElement,
+		mode: "reading" | "cm"
 	) {
+		const coords = getCoords(e);
+		if (!coords) return;
 		const view =
 			this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view) return;
 		const editor = view.editor;
-		const lineIndex = this.findLineForReadingLi(li);
+		const lines = this.getEditorLines(editor);
+
+		const lineIndex =
+			mode === "reading"
+				? this.findLineForReadingLi(element, editor)
+				: this.getEditorLineFromCMLine(element, editor);
 		if (lineIndex === -1) return;
-		const items = this.parseListItems(editor);
-		const sourceItem = items.find((item) => item.line === lineIndex);
-		if (!sourceItem) return;
-		const sourceItems = this.getItemWithChildren(sourceItem, items);
-		li.classList.add("ddl-dragging");
-		document.body.classList.add("ddl-drag-active");
-		const ghost = this.createGhost(
-			this.getDirectTextContent(li).trim(),
-			e.clientX,
-			e.clientY
+
+		const items = parseListItems(lines);
+		const sourceItem = items.find(
+			(item) => item.line === lineIndex
 		);
-		const indicator = this.createIndicator(container);
+		if (!sourceItem) return;
+		const sourceItems = getItemWithChildren(sourceItem, items);
+
+		element.classList.add("ddl-dragging");
+		document.body.classList.add("ddl-drag-active");
+
+		const ghostText =
+			mode === "reading"
+				? this.getDirectTextContent(element).trim()
+				: element.textContent?.trim() || "";
+		const ghost = this.createGhost(
+			ghostText,
+			coords.clientX,
+			coords.clientY
+		);
+
+		const indicatorParent =
+			mode === "cm"
+				? (container.querySelector(".cm-scroller") instanceof
+				  HTMLElement
+						? container.querySelector(".cm-scroller")
+						: container)!
+				: container;
+		const indicator = this.createIndicator(
+			indicatorParent as HTMLElement
+		);
+
 		this.dragState = {
 			sourceLine: lineIndex,
 			sourceItems,
@@ -253,89 +345,184 @@ export default class DragDropListPlugin extends Plugin {
 			editor,
 			container,
 		};
-		const onMouseMove = (ev: MouseEvent) => {
+
+		const scrollContainer =
+			mode === "cm"
+				? (container.querySelector(".cm-scroller") || container)
+				: container;
+
+		this.startAutoScroll(scrollContainer as HTMLElement);
+
+		const onPointerMove = (ev: MouseEvent | TouchEvent) => {
 			ev.preventDefault();
 			ev.stopPropagation();
 			window.getSelection()?.removeAllRanges();
-			this.onDragMoveReading(ev, container);
+			const moveCoords = getCoords(ev);
+			if (!moveCoords) return;
+			this.lastDragY = moveCoords.clientY;
+			if (mode === "reading") {
+				this.onDragMoveReading(moveCoords, container);
+			} else {
+				this.onDragMoveCM(moveCoords, container);
+			}
 		};
 		const preventSelect = (ev: Event) => ev.preventDefault();
 		document.addEventListener("selectstart", preventSelect, true);
 		window.getSelection()?.removeAllRanges();
-		const onMouseUp = () => {
-			document.removeEventListener("mousemove", onMouseMove, true);
-			document.removeEventListener("mouseup", onMouseUp, true);
-			document.removeEventListener(
-				"selectstart",
-				preventSelect,
-				true
-			);
-			li.classList.remove("ddl-dragging");
+
+		const cleanup = () => {
+			this.stopAutoScroll();
+			document.removeEventListener("mousemove", onPointerMove as EventListener, true);
+			document.removeEventListener("mouseup", onPointerUp, true);
+			document.removeEventListener("touchmove", onPointerMove as EventListener, true);
+			document.removeEventListener("touchend", onPointerUp, true);
+			document.removeEventListener("touchcancel", onPointerUp, true);
+			document.removeEventListener("selectstart", preventSelect, true);
+			element.classList.remove("ddl-dragging");
 			document.body.classList.remove("ddl-drag-active");
+		};
+
+		const onPointerUp = () => {
+			cleanup();
 			this.finishDrag();
 		};
-		document.addEventListener("mousemove", onMouseMove, true);
-		document.addEventListener("mouseup", onMouseUp, true);
+
+		document.addEventListener("mousemove", onPointerMove as EventListener, true);
+		document.addEventListener("mouseup", onPointerUp, true);
+		document.addEventListener("touchmove", onPointerMove as EventListener, { capture: true, passive: false });
+		document.addEventListener("touchend", onPointerUp, true);
+		document.addEventListener("touchcancel", onPointerUp, true);
 	}
 
-	private onDragMoveReading(e: MouseEvent, container: HTMLElement) {
+	// ---- Drag Move Handlers ----
+
+	private onDragMoveReading(
+		coords: { clientX: number; clientY: number },
+		container: HTMLElement
+	) {
 		if (!this.dragState) return;
-		if (this.dragState.ghost) {
-			this.dragState.ghost.style.left = `${e.clientX + 12}px`;
-			this.dragState.ghost.style.top = `${e.clientY - 10}px`;
-		}
+		this.updateGhostPosition(coords);
+
 		const allLis = container.querySelectorAll(
 			".markdown-reading-view li, .tasks-plugin-main-list li, .plugin-tasks-list-item"
 		);
-		let closest: HTMLElement | null = null;
-		let closestDist = Infinity;
-		let position = "after" as "before" | "after";
-		allLis.forEach((targetLi) => {
-			if (!(targetLi instanceof HTMLElement)) return;
-			const rect = targetLi.getBoundingClientRect();
-			const midY = rect.top + rect.height / 2;
-			const dist = Math.abs(e.clientY - midY);
-			if (dist < closestDist) {
-				closestDist = dist;
-				closest = targetLi;
-				position = e.clientY < midY ? "before" : "after";
-			}
-		});
-		if (closest && this.dragState.indicator) {
-			const rect = (closest as HTMLElement).getBoundingClientRect();
-			const containerRect = container.getBoundingClientRect();
-			const scrollTop = container.scrollTop || 0;
-			const y =
-				position === "before"
-					? rect.top - containerRect.top + scrollTop
-					: rect.bottom - containerRect.top + scrollTop;
-			this.dragState.indicator.style.top = `${y}px`;
-			this.dragState.indicator.style.display = "block";
-			const targetLine = this.findLineForReadingLi(
-				closest as HTMLElement
-			);
-			if (targetLine !== -1) {
-				this.dragState.targetLine = targetLine;
-				this.dragState.targetPosition = position;
-			}
+		const { closest, position } = this.findClosestElement(
+			coords.clientY,
+			allLis
+		);
+		if (!closest || !this.dragState.indicator) return;
+
+		const rect = closest.getBoundingClientRect();
+		const containerRect = container.getBoundingClientRect();
+		const scrollTop = container.scrollTop || 0;
+		const y =
+			position === "before"
+				? rect.top - containerRect.top + scrollTop
+				: rect.bottom - containerRect.top + scrollTop;
+
+		this.dragState.indicator.style.top = `${y}px`;
+		this.dragState.indicator.style.display = "block";
+
+		const targetLine = this.findLineForReadingLi(
+			closest,
+			this.dragState.editor
+		);
+		if (targetLine !== -1) {
+			this.dragState.targetLine = targetLine;
+			this.dragState.targetPosition = position;
 		}
 	}
 
-	private findLineForReadingLi(li: HTMLElement): number {
-		const view =
-			this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!view) return -1;
-		const editor = view.editor;
+	private onDragMoveCM(
+		coords: { clientX: number; clientY: number },
+		container: HTMLElement
+	) {
+		if (!this.dragState?.editor) return;
+		this.updateGhostPosition(coords);
+
+		const cmLines = container.querySelectorAll(".cm-line");
+		const filtered: HTMLElement[] = [];
+		cmLines.forEach((el) => {
+			if (
+				el instanceof HTMLElement &&
+				this.isListItemLine(el)
+			) {
+				filtered.push(el);
+			}
+		});
+		const { closest, position } = this.findClosestElement(
+			coords.clientY,
+			filtered
+		);
+		if (!closest || !this.dragState.indicator) return;
+
+		const rect = closest.getBoundingClientRect();
+		const scroller =
+			container.querySelector(".cm-scroller") || container;
+		const scrollerRect = scroller.getBoundingClientRect();
+		const y =
+			position === "before"
+				? rect.top - scrollerRect.top + scroller.scrollTop
+				: rect.bottom - scrollerRect.top + scroller.scrollTop;
+
+		this.dragState.indicator.style.top = `${y}px`;
+		this.dragState.indicator.style.display = "block";
+
+		const targetLineNum = this.getEditorLineFromCMLine(
+			closest,
+			this.dragState.editor
+		);
+		if (targetLineNum !== -1) {
+			this.dragState.targetLine = targetLineNum;
+			this.dragState.targetPosition = position;
+		}
+	}
+
+	private updateGhostPosition(coords: { clientX: number; clientY: number }) {
+		if (this.dragState?.ghost) {
+			this.dragState.ghost.style.left = `${coords.clientX + 12}px`;
+			this.dragState.ghost.style.top = `${coords.clientY - 10}px`;
+		}
+	}
+
+	private findClosestElement(
+		clientY: number,
+		elements: NodeListOf<Element> | HTMLElement[]
+	): { closest: HTMLElement | null; position: "before" | "after" } {
+		let closest: HTMLElement | null = null;
+		let closestDist = Infinity;
+		let position = "after" as "before" | "after";
+		elements.forEach((el) => {
+			if (!(el instanceof HTMLElement)) return;
+			const rect = el.getBoundingClientRect();
+			const midY = rect.top + rect.height / 2;
+			const dist = Math.abs(clientY - midY);
+			if (dist < closestDist) {
+				closestDist = dist;
+				closest = el;
+				position = clientY < midY ? "before" : "after";
+			}
+		});
+		return { closest, position };
+	}
+
+	// ---- Line Resolution ----
+
+	private findLineForReadingLi(
+		li: HTMLElement,
+		editor: Editor
+	): number {
 		const text = this.getDirectTextContent(li).trim();
 		if (!text) return -1;
 		for (let i = 0; i < editor.lineCount(); i++) {
 			const lineText = editor.getLine(i);
 			const stripped = lineText
-				.replace(/^\s*[-*+]\s+(\[.\]\s+)?|^\s*\d+\.\s+/, "")
+				.replace(
+					/^\s*[-*+]\s+(\[.\]\s+)?|^\s*\d+\.\s+/,
+					""
+				)
 				.trim();
-			if (stripped === text) {
-				return i;
-			}
+			if (stripped === text) return i;
 		}
 		return -1;
 	}
@@ -355,118 +542,6 @@ export default class DragDropListPlugin extends Plugin {
 			}
 		});
 		return text;
-	}
-
-	// ---- CodeMirror (Live Preview) Drag ----
-
-	private startDragCM(
-		e: MouseEvent,
-		line: HTMLElement,
-		container: HTMLElement
-	) {
-		const view =
-			this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!view) return;
-		const editor = view.editor;
-		const lineIndex = this.getEditorLineFromCMLine(line, editor);
-		if (lineIndex === -1) return;
-		const items = this.parseListItems(editor);
-		const sourceItem = items.find((item) => item.line === lineIndex);
-		if (!sourceItem) return;
-		const sourceItems = this.getItemWithChildren(sourceItem, items);
-		line.classList.add("ddl-dragging");
-		document.body.classList.add("ddl-drag-active");
-		const ghost = this.createGhost(
-			line.textContent?.trim() || "",
-			e.clientX,
-			e.clientY
-		);
-		const scroller =
-			container.querySelector(".cm-scroller") || container;
-		const indicator = this.createIndicator(
-			scroller instanceof HTMLElement ? scroller : container
-		);
-		this.dragState = {
-			sourceLine: lineIndex,
-			sourceItems,
-			ghost,
-			indicator,
-			targetLine: -1,
-			targetPosition: "after",
-			editor,
-			container,
-		};
-		const onMouseMove = (ev: MouseEvent) => {
-			ev.preventDefault();
-			ev.stopPropagation();
-			window.getSelection()?.removeAllRanges();
-			this.onDragMoveCM(ev, container);
-		};
-		const preventSelect = (ev: Event) => ev.preventDefault();
-		document.addEventListener("selectstart", preventSelect, true);
-		window.getSelection()?.removeAllRanges();
-		const onMouseUp = () => {
-			document.removeEventListener("mousemove", onMouseMove, true);
-			document.removeEventListener("mouseup", onMouseUp, true);
-			document.removeEventListener(
-				"selectstart",
-				preventSelect,
-				true
-			);
-			line.classList.remove("ddl-dragging");
-			document.body.classList.remove("ddl-drag-active");
-			this.finishDrag();
-		};
-		document.addEventListener("mousemove", onMouseMove, true);
-		document.addEventListener("mouseup", onMouseUp, true);
-	}
-
-	private onDragMoveCM(e: MouseEvent, container: HTMLElement) {
-		if (!this.dragState || !this.dragState.editor) return;
-		if (this.dragState.ghost) {
-			this.dragState.ghost.style.left = `${e.clientX + 12}px`;
-			this.dragState.ghost.style.top = `${e.clientY - 10}px`;
-		}
-		const cmLines = container.querySelectorAll(".cm-line");
-		let closest: HTMLElement | null = null;
-		let closestDist = Infinity;
-		let position = "after" as "before" | "after";
-		cmLines.forEach((cmLine) => {
-			if (!(cmLine instanceof HTMLElement)) return;
-			if (!this.isListItemLine(cmLine)) return;
-			const rect = cmLine.getBoundingClientRect();
-			const midY = rect.top + rect.height / 2;
-			const dist = Math.abs(e.clientY - midY);
-			if (dist < closestDist) {
-				closestDist = dist;
-				closest = cmLine;
-				position = e.clientY < midY ? "before" : "after";
-			}
-		});
-		if (closest && this.dragState.indicator) {
-			const rect = (closest as HTMLElement).getBoundingClientRect();
-			const scroller =
-				container.querySelector(".cm-scroller") || container;
-			const scrollerRect = scroller.getBoundingClientRect();
-			const y =
-				position === "before"
-					? rect.top -
-						scrollerRect.top +
-						scroller.scrollTop
-					: rect.bottom -
-						scrollerRect.top +
-						scroller.scrollTop;
-			this.dragState.indicator.style.top = `${y}px`;
-			this.dragState.indicator.style.display = "block";
-			const targetLineNum = this.getEditorLineFromCMLine(
-				closest as HTMLElement,
-				this.dragState.editor
-			);
-			if (targetLineNum !== -1) {
-				this.dragState.targetLine = targetLineNum;
-				this.dragState.targetPosition = position;
-			}
-		}
 	}
 
 	private getEditorLineFromCMLine(
@@ -499,7 +574,7 @@ export default class DragDropListPlugin extends Plugin {
 		return -1;
 	}
 
-	// ---- Shared Drag Logic ----
+	// ---- Ghost & Indicator ----
 
 	private createGhost(
 		text: string,
@@ -524,6 +599,8 @@ export default class DragDropListPlugin extends Plugin {
 		return indicator;
 	}
 
+	// ---- Finish Drag ----
+
 	private finishDrag() {
 		if (!this.dragState) return;
 		const {
@@ -534,207 +611,31 @@ export default class DragDropListPlugin extends Plugin {
 			ghost,
 			indicator,
 		} = this.dragState;
+
 		if (ghost) ghost.remove();
 		if (indicator) indicator.remove();
+
 		if (targetLine === -1 || !editor) {
 			this.dragState = null;
 			return;
 		}
+
 		const sourceLines = sourceItems.map((item) => item.line);
 		if (sourceLines.includes(targetLine)) {
 			this.dragState = null;
 			return;
 		}
-		this.moveListItems(
-			editor,
+
+		const lines = this.getEditorLines(editor);
+		const newLines = moveListItems(
+			lines,
 			sourceItems,
 			targetLine,
 			targetPosition
 		);
+		this.setEditorLines(editor, newLines);
+
 		this.dragState = null;
 		setTimeout(() => this.attachToActiveView(), 100);
-	}
-
-	private moveListItems(
-		editor: Editor,
-		sourceItems: ListItem[],
-		targetLine: number,
-		position: "before" | "after"
-	) {
-		const sortedItems = [...sourceItems].sort(
-			(a, b) => a.line - b.line
-		);
-		const sourceLineNumbers = sortedItems.map((item) => item.line);
-		const sourceTexts = sortedItems.map((item) =>
-			editor.getLine(item.line)
-		);
-		const targetText = editor.getLine(targetLine);
-		const targetIndent =
-			targetText.match(/^(\s*)/)?.[1] || "";
-		const sourceBaseIndent =
-			sourceTexts[0].match(/^(\s*)/)?.[1] || "";
-		const adjustedTexts = sourceTexts.map((text) => {
-			const currentIndent = text.match(/^(\s*)/)?.[1] || "";
-			const relativeIndent = currentIndent.substring(
-				sourceBaseIndent.length
-			);
-			return targetIndent + relativeIndent + text.trimStart();
-		});
-
-		let insertLine: number;
-		if (position === "before") {
-			insertLine = targetLine;
-		} else {
-			insertLine = this.findLastChildLine(targetLine, editor) + 1;
-		}
-
-		const sourceAboveCount = sourceLineNumbers.filter(
-			(ln) => ln < insertLine
-		).length;
-		const reversedLines = [...sourceLineNumbers].reverse();
-		for (const ln of reversedLines) {
-			const from = { line: ln, ch: 0 };
-			const to =
-				ln + 1 < editor.lineCount()
-					? { line: ln + 1, ch: 0 }
-					: { line: ln, ch: editor.getLine(ln).length };
-			editor.replaceRange("", from, to);
-		}
-
-		const adjustedInsertLine = insertLine - sourceAboveCount;
-		const clampedInsert = Math.min(
-			Math.max(0, adjustedInsertLine),
-			editor.lineCount()
-		);
-		const insertText = adjustedTexts.join("\n") + "\n";
-
-		if (clampedInsert >= editor.lineCount()) {
-			const lastLine = editor.lineCount() - 1;
-			const lastLineText = editor.getLine(lastLine);
-			editor.replaceRange(
-				"\n" + adjustedTexts.join("\n"),
-				{ line: lastLine, ch: lastLineText.length },
-				{ line: lastLine, ch: lastLineText.length }
-			);
-			this.renumberOrderedList(editor, lastLine + 1);
-		} else {
-			editor.replaceRange(insertText, {
-				line: clampedInsert,
-				ch: 0,
-			});
-		}
-		this.renumberOrderedList(editor, clampedInsert);
-	}
-
-	private renumberOrderedList(editor: Editor, aroundLine: number) {
-		const lineText = editor.getLine(aroundLine);
-		if (!/^\s*\d+\.\s/.test(lineText)) return;
-		const indentLen = (lineText.match(/^(\s*)/)?.[1] || "").length;
-
-		let start = aroundLine;
-		for (let i = aroundLine - 1; i >= 0; i--) {
-			const t = editor.getLine(i);
-			const tIndentLen = (t.match(/^(\s*)/)?.[1] || "").length;
-			if (tIndentLen < indentLen) break;
-			if (tIndentLen === indentLen) {
-				if (/^\s*\d+\.\s/.test(t)) {
-					start = i;
-				} else {
-					break;
-				}
-			}
-		}
-
-		let num = 1;
-		for (let i = start; i < editor.lineCount(); i++) {
-			const t = editor.getLine(i);
-			if (t.trim() === "" && i > start) break;
-			const tIndentLen = (t.match(/^(\s*)/)?.[1] || "").length;
-			if (tIndentLen < indentLen && i > start) break;
-			if (tIndentLen === indentLen) {
-				if (/^\s*\d+\.\s/.test(t)) {
-					const newText = t.replace(
-						/^(\s*)\d+\./,
-						`$1${num}.`
-					);
-					if (newText !== t) {
-						editor.replaceRange(
-							newText,
-							{ line: i, ch: 0 },
-							{ line: i, ch: t.length }
-						);
-					}
-					num++;
-				} else {
-					break;
-				}
-			}
-		}
-	}
-
-	private findLastChildLine(line: number, editor: Editor): number {
-		const baseText = editor.getLine(line);
-		const baseIndent = (
-			baseText.match(/^(\s*)/)?.[1] || ""
-		).length;
-		let lastChild = line;
-		for (let i = line + 1; i < editor.lineCount(); i++) {
-			const lineText = editor.getLine(i);
-			if (lineText.trim() === "") continue;
-			const indent = (
-				lineText.match(/^(\s*)/)?.[1] || ""
-			).length;
-			if (indent > baseIndent) {
-				lastChild = i;
-			} else {
-				break;
-			}
-		}
-		return lastChild;
-	}
-
-	// ---- List Parsing ----
-
-	private parseListItems(editor: Editor): ListItem[] {
-		const items: ListItem[] = [];
-		for (let i = 0; i < editor.lineCount(); i++) {
-			const text = editor.getLine(i);
-			if (
-				/^\s*[-*+]\s/.test(text) ||
-				/^\s*\d+\.\s/.test(text) ||
-				/^\s*[-*+]\s*\[.\]\s/.test(text)
-			) {
-				const indent = (
-					text.match(/^(\s*)/)?.[1] || ""
-				).length;
-				items.push({ line: i, text, indent, children: [] });
-			}
-		}
-		for (let i = 0; i < items.length; i++) {
-			for (let j = i + 1; j < items.length; j++) {
-				if (items[j].indent > items[i].indent) {
-					items[i].children.push(items[j]);
-				} else {
-					break;
-				}
-			}
-		}
-		return items;
-	}
-
-	private getItemWithChildren(
-		item: ListItem,
-		allItems: ListItem[]
-	): ListItem[] {
-		const result = [item];
-		const idx = allItems.indexOf(item);
-		for (let i = idx + 1; i < allItems.length; i++) {
-			if (allItems[i].indent > item.indent) {
-				result.push(allItems[i]);
-			} else {
-				break;
-			}
-		}
-		return result;
 	}
 }
