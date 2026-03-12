@@ -23,20 +23,13 @@
 	z-index: 10;
 }
 
-/* Mobile Reading View: handle hidden, shown only on selected item */
+/* Mobile Reading View: handle repositioned to right side */
 .ddl-mobile-handle {
 	left: auto !important;
-	right: 8px;
-	opacity: 0;
-	width: 24px;
+	right: -28px;
+	opacity: 0.5;
+	width: 28px;
 	height: 28px;
-	font-size: 18px;
-	color: var(--text-muted);
-}
-
-.ddl-mobile-selected > .ddl-mobile-handle {
-	opacity: 1;
-	color: var(--text-normal);
 }
 
 .ddl-drag-handle:hover {
@@ -139,6 +132,10 @@
 
 /* ===== Drop indicator ===== */
 
+.ddl-indicator-parent {
+	position: relative;
+}
+
 .ddl-drop-indicator {
 	position: absolute;
 	left: 0;
@@ -148,6 +145,12 @@
 	border-radius: 1px;
 	pointer-events: none;
 	z-index: 100;
+	display: none;
+	top: var(--ddl-indicator-top, 0);
+}
+
+.ddl-drop-indicator.ddl-visible {
+	display: block;
 }
 
 .ddl-drop-indicator::before,
@@ -204,4 +207,6 @@ body.ddl-drag-active .ddl-float-handle {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	font-size: var(--font-text-size);
+	left: var(--ddl-ghost-left, 0);
+	top: var(--ddl-ghost-top, 0);
 }

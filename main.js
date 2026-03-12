@@ -184,7 +184,7 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
     this.globalMouseDownHandler = null;
     this.globalTouchStartHandler = null;
   }
-  async onload() {
+  onload() {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this.scheduleAttach();
@@ -326,13 +326,8 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
     };
     handle.addEventListener("mousedown", startDrag);
     handle.addEventListener("touchstart", startDrag, { passive: false });
-    handle.style.zIndex = "10";
     if (import_obsidian.Platform.isMobile) {
-      handle.style.left = "auto";
-      handle.style.right = "-28px";
-      handle.style.opacity = "0.5";
-      handle.style.width = "28px";
-      handle.style.height = "28px";
+      handle.classList.add("ddl-mobile-handle");
     }
     li.insertBefore(handle, li.firstChild);
   }
@@ -494,8 +489,10 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
     const containerRect = container.getBoundingClientRect();
     const scrollTop = container.scrollTop || 0;
     const y = position === "before" ? rect.top - containerRect.top + scrollTop : rect.bottom - containerRect.top + scrollTop;
-    this.dragState.indicator.style.top = `${y}px`;
-    this.dragState.indicator.style.display = "block";
+    this.dragState.indicator.setCssProps({
+      "--ddl-indicator-top": `${y}px`
+    });
+    this.dragState.indicator.classList.add("ddl-visible");
     const targetLine = this.findLineForReadingLi(
       closest,
       this.dragState.editor
@@ -527,8 +524,10 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
     const scroller = container.querySelector(".cm-scroller") || container;
     const scrollerRect = scroller.getBoundingClientRect();
     const y = position === "before" ? rect.top - scrollerRect.top + scroller.scrollTop : rect.bottom - scrollerRect.top + scroller.scrollTop;
-    this.dragState.indicator.style.top = `${y}px`;
-    this.dragState.indicator.style.display = "block";
+    this.dragState.indicator.setCssProps({
+      "--ddl-indicator-top": `${y}px`
+    });
+    this.dragState.indicator.classList.add("ddl-visible");
     const targetLineNum = this.getEditorLineFromCMLine(
       closest,
       this.dragState.editor
@@ -541,8 +540,10 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
   updateGhostPosition(coords) {
     var _a;
     if ((_a = this.dragState) == null ? void 0 : _a.ghost) {
-      this.dragState.ghost.style.left = `${coords.clientX + 12}px`;
-      this.dragState.ghost.style.top = `${coords.clientY - 10}px`;
+      this.dragState.ghost.setCssProps({
+        "--ddl-ghost-left": `${coords.clientX + 12}px`,
+        "--ddl-ghost-top": `${coords.clientY - 10}px`
+      });
     }
   }
   findClosestElement(clientY, elements) {
@@ -616,16 +617,17 @@ var DragDropListPlugin = class extends import_obsidian.Plugin {
     const ghost = document.createElement("div");
     ghost.className = "ddl-ghost";
     ghost.textContent = text.substring(0, 80);
-    ghost.style.left = `${x + 12}px`;
-    ghost.style.top = `${y - 10}px`;
+    ghost.setCssProps({
+      "--ddl-ghost-left": `${x + 12}px`,
+      "--ddl-ghost-top": `${y - 10}px`
+    });
     document.body.appendChild(ghost);
     return ghost;
   }
   createIndicator(parent) {
     const indicator = document.createElement("div");
     indicator.className = "ddl-drop-indicator";
-    indicator.style.display = "none";
-    parent.style.position = "relative";
+    parent.classList.add("ddl-indicator-parent");
     parent.appendChild(indicator);
     return indicator;
   }

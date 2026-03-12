@@ -18,6 +18,11 @@ interface DragState {
 	container: HTMLElement;
 }
 
+interface CMEditorView {
+	posAtDOM(node: Node): number;
+	state: { doc: { lineAt(pos: number): { number: number } } };
+}
+
 function getCoords(e: MouseEvent | TouchEvent): { clientX: number; clientY: number } | null {
 	if ("touches" in e) {
 		const touch = e.touches[0] || e.changedTouches[0];
@@ -39,7 +44,7 @@ export default class DragDropListPlugin extends Plugin {
 	private globalMouseDownHandler: ((e: MouseEvent) => void) | null = null;
 	private globalTouchStartHandler: ((e: TouchEvent) => void) | null = null;
 
-	async onload() {
+	onload() {
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", () => {
 				this.scheduleAttach();
@@ -203,13 +208,8 @@ export default class DragDropListPlugin extends Plugin {
 		};
 		handle.addEventListener("mousedown", startDrag);
 		handle.addEventListener("touchstart", startDrag, { passive: false });
-		handle.style.zIndex = "10";
 		if (Platform.isMobile) {
-			handle.style.left = "auto";
-			handle.style.right = "-28px";
-			handle.style.opacity = "0.5";
-			handle.style.width = "28px";
-			handle.style.height = "28px";
+			handle.classList.add("ddl-mobile-handle");
 		}
 		li.insertBefore(handle, li.firstChild);
 	}
@@ -420,8 +420,10 @@ export default class DragDropListPlugin extends Plugin {
 				? rect.top - containerRect.top + scrollTop
 				: rect.bottom - containerRect.top + scrollTop;
 
-		this.dragState.indicator.style.top = `${y}px`;
-		this.dragState.indicator.style.display = "block";
+		this.dragState.indicator.setCssProps({
+			"--ddl-indicator-top": `${y}px`,
+		});
+		this.dragState.indicator.classList.add("ddl-visible");
 
 		const targetLine = this.findLineForReadingLi(
 			closest,
@@ -465,8 +467,10 @@ export default class DragDropListPlugin extends Plugin {
 				? rect.top - scrollerRect.top + scroller.scrollTop
 				: rect.bottom - scrollerRect.top + scroller.scrollTop;
 
-		this.dragState.indicator.style.top = `${y}px`;
-		this.dragState.indicator.style.display = "block";
+		this.dragState.indicator.setCssProps({
+			"--ddl-indicator-top": `${y}px`,
+		});
+		this.dragState.indicator.classList.add("ddl-visible");
 
 		const targetLineNum = this.getEditorLineFromCMLine(
 			closest,
@@ -480,8 +484,10 @@ export default class DragDropListPlugin extends Plugin {
 
 	private updateGhostPosition(coords: { clientX: number; clientY: number }) {
 		if (this.dragState?.ghost) {
-			this.dragState.ghost.style.left = `${coords.clientX + 12}px`;
-			this.dragState.ghost.style.top = `${coords.clientY - 10}px`;
+			this.dragState.ghost.setCssProps({
+				"--ddl-ghost-left": `${coords.clientX + 12}px`,
+				"--ddl-ghost-top": `${coords.clientY - 10}px`,
+			});
 		}
 	}
 
@@ -548,8 +554,7 @@ export default class DragDropListPlugin extends Plugin {
 		cmLine: HTMLElement,
 		editor: Editor
 	): number {
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const cmEditor = (editor as any).cm;
+		const cmEditor = (editor as Editor & { cm?: CMEditorView }).cm;
 		if (cmEditor) {
 			try {
 				const pos = cmEditor.posAtDOM(cmLine);
@@ -584,8 +589,10 @@ export default class DragDropListPlugin extends Plugin {
 		const ghost = document.createElement("div");
 		ghost.className = "ddl-ghost";
 		ghost.textContent = text.substring(0, 80);
-		ghost.style.left = `${x + 12}px`;
-		ghost.style.top = `${y - 10}px`;
+		ghost.setCssProps({
+			"--ddl-ghost-left": `${x + 12}px`,
+			"--ddl-ghost-top": `${y - 10}px`,
+		});
 		document.body.appendChild(ghost);
 		return ghost;
 	}
@@ -593,8 +600,7 @@ export default class DragDropListPlugin extends Plugin {
 	private createIndicator(parent: HTMLElement): HTMLElement {
 		const indicator = document.createElement("div");
 		indicator.className = "ddl-drop-indicator";
-		indicator.style.display = "none";
-		parent.style.position = "relative";
+		parent.classList.add("ddl-indicator-parent");
 		parent.appendChild(indicator);
 		return indicator;
 	}
